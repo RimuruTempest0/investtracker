@@ -1,0 +1,800 @@
+/* InvestTracker — 个人投资行情面板
+ * 纯静态前端：TradingView 免费 widget 提供实时行情，TradingView scanner 接口拉取数字价格用于计算总资产。
+ * 持仓数据存于浏览器 localStorage。无构建步骤、无后端依赖，可部署到 GitHub Pages。
+ */
+(function () {
+  "use strict";
+
+  const STORAGE_KEY = "investtracker-dashboard-v1";
+  const SCANNER = "https://scanner.tradingview.com/";
+  const TV_EMBED = "https://s3.tradingview.com/external-embedding/";
+  const GOLD_GRAMS_PER_OUNCE = 31.1035;
+  const REFRESH_MS = 60000;
+  const FALLBACK_USDCNY = 7.2;
+
+  const CATS = {
+    us:     { name: "美股",   color: "#2962ff", region: "america", currency: "USD", costUnit: "美元" },
+    cn:     { name: "A股",    color: "#e53935", region: "china",   currency: "CNY", costUnit: "人民币" },
+    crypto: { name: "虚拟币", color: "#f7931a", region: "crypto",  currency: "USD", costUnit: "美元" },
+    gold:   { name: "黄金",   color: "#d4a017", region: "cfd",     currency: "USD", qtyUnit: "克", costUnit: "元/克" },
+  };
+  const CAT_ORDER = ["us", "cn", "crypto", "gold"];
+
+  const SYMBOL_HINTS = {
+    us:     "示例：NASDAQ:AAPL · NYSE:BABA · NASDAQ:TSLA",
+    cn:     "示例：SSE:600519（沪市）· SZSE:000858（深市）",
+    crypto: "示例：BINANCE:BTCUSDT · BINANCE:ETHUSDT（BNB 要填 BINANCE:BNBUSDT，必须带计价币）",
+    gold:   "示例：TVC:GOLD（现货金）· COMEX:GC1!（期货）",
+  };
+
+  const EXAMPLES = [
+    { cat: "us",     symbol: "NASDAQ:AAPL",   label: "苹果",       qty: "10",  cost: "220" },
+    { cat: "us",     symbol: "NASDAQ:TSLA",   label: "特斯拉",     qty: "20",  cost: "300" },
+    { cat: "cn",     symbol: "SSE:600519",    label: "贵州茅台",   qty: "5",   cost: "1500" },
+    { cat: "cn",     symbol: "SZSE:000858",   label: "五粮液",     qty: "100", cost: "130" },
+    { cat: "crypto", symbol: "BINANCE:BTCUSDT", label: "比特币",   qty: "0.5", cost: "60000" },
+    { cat: "crypto", symbol: "BINANCE:ETHUSDT", label: "以太坊",   qty: "5",   cost: "3000" },
+    { cat: "gold",   symbol: "TVC:GOLD",      label: "现货黄金",   qty: "100", cost: "550" },
+  ];
+
+  let state = null;
+  let formCat = "us";
+  const prices = {};   // symbol -> { price, change }
+  let fx = null;       // { rate, fallback }
+  let suggestResults = [];
+  let suggestIndex = -1;
+
+  /* ---------------- 工具 ---------------- */
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function genId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+
+  function $(sel) { return document.querySelector(sel); }
+
+  function fmtMoney(n) {
+    return "¥ " + n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtCompact(n) {
+    if (n >= 1e8) return "¥ " + (n / 1e8).toFixed(2) + " 亿";
+    if (n >= 1e4) return "¥ " + (n / 1e4).toFixed(2) + " 万";
+    return fmtMoney(n);
+  }
+
+  function fmtSigned(n) {
+    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+    return sign + "¥ " + Math.abs(n).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  /* ---------------- 存储 ---------------- */
+
+  function safeGet(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function save() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+  }
+
+  function normalize(data) {
+    const holdings = (data && Array.isArray(data.holdings) ? data.holdings : [])
+      .map(function (h) {
+        return {
+          id: h.id || genId(),
+          cat: CATS[h.cat] ? h.cat : "us",
+          symbol: String(h.symbol || "").trim(),
+          label: String(h.label || "").trim(),
+          qty: String(h.qty || "").trim(),
+          cost: String(h.cost || "").trim(),
+        };
+      })
+      .filter(function (h) { return h.symbol; });
+
+    return {
+      theme: data && data.theme === "light" ? "light" : "dark",
+      holdings: holdings,
+    };
+  }
+
+  function load() {
+    const raw = safeGet(STORAGE_KEY);
+    if (raw) {
+      try { return normalize(JSON.parse(raw)); } catch (e) {}
+    }
+    return normalize({
+      theme: "dark",
+      holdings: EXAMPLES.map(function (h) { return Object.assign({ id: genId() }, h); }),
+    });
+  }
+
+  /* ---------------- 行情抓取（TradingView scanner） ---------------- */
+
+  async function fetchSymbol(symbol, region) {
+    const res = await fetch(SCANNER + region + "/scan", {
+      method: "POST",
+      // 不显式设 Content-Type，浏览器会用 text/plain，避免触发 CORS 预检失败。
+      body: JSON.stringify({
+        symbols: { tickers: [symbol], query: { types: [] } },
+        columns: ["name", "close", "change"],
+      }),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const row = json && json.data && json.data[0];
+    if (row && row.d && isFinite(row.d[1])) return { price: row.d[1], change: row.d[2] };
+    return null;
+  }
+
+  // 根据交易所前缀决定 scanner 区域，找不到就用类别默认区域。
+  function regionFor(symbol) {
+    const ex = String(symbol).split(":")[0].toUpperCase();
+    const MAP = {
+      BINANCE: "crypto", COINBASE: "crypto", BITSTAMP: "crypto", KRAKEN: "crypto",
+      BITFINEX: "crypto", HUOBI: "crypto", OKX: "crypto", BYBIT: "crypto",
+      GATEIO: "crypto", KUCOIN: "crypto", CRYPTO: "crypto",
+      NASDAQ: "america", NYSE: "america", AMEX: "america", ARCA: "america", BATS: "america",
+      CME: "america", CBOT: "america", NYMEX: "america",
+      SSE: "china", SZSE: "china", HKEX: "hong_kong",
+      OANDA: "forex", FX: "forex", FOREXCOM: "forex", FX_IDC: "forex",
+      TVC: "cfd", CAPITALCOM: "cfd",
+    };
+    return MAP[ex] || null;
+  }
+
+  async function refreshPrices() {
+    const seen = {};
+    const tasks = state.holdings.map(function (h) {
+      if (seen[h.symbol]) return Promise.resolve();
+      seen[h.symbol] = true;
+      const region = regionFor(h.symbol) || (CATS[h.cat] && CATS[h.cat].region) || "america";
+      return fetchSymbol(h.symbol, region)
+        .then(function (p) { if (p) prices[h.symbol] = p; })
+        .catch(function () {});
+    });
+    await Promise.all(tasks);
+
+    try {
+      const p = await fetchSymbol("FX_IDC:USDCNY", "forex");
+      fx = p ? { rate: p.price, fallback: false } : { rate: FALLBACK_USDCNY, fallback: true };
+    } catch (e) {
+      fx = { rate: FALLBACK_USDCNY, fallback: true };
+    }
+
+    renderLive();
+    renderSummary();
+  }
+
+  /* ---------------- 估值 ---------------- */
+
+  function valueCNY(h) {
+    const qty = parseFloat(h.qty);
+    if (!isFinite(qty)) return null;
+    const p = prices[h.symbol];
+    if (!p || !isFinite(p.price)) return null;
+    const cat = CATS[h.cat] || CATS.us;
+    if (cat.currency === "CNY") return qty * p.price;
+    if (!fx || !isFinite(fx.rate)) return null;
+    if (h.cat === "gold") return qty * (p.price * fx.rate / GOLD_GRAMS_PER_OUNCE); // 按克
+    return qty * p.price * fx.rate;
+  }
+
+  // 本金（成本）：数量 × 成本价，换算成人民币。黄金的成本价按「元/克」记，A股按人民币，美股/虚拟币按美元。
+  function costCNY(h) {
+    const qty = parseFloat(h.qty);
+    if (!isFinite(qty)) return null;
+    const cost = parseFloat(h.cost);
+    if (!isFinite(cost)) return null;
+    const cat = CATS[h.cat] || CATS.us;
+    if (cat.currency === "CNY") return qty * cost; // A股：成本已是人民币
+    if (h.cat === "gold") return qty * cost;       // 黄金：数量(克) × 成本(元/克)
+    if (!fx || !isFinite(fx.rate)) return null;
+    return qty * cost * fx.rate;                    // 美股/虚拟币：美元成本 × 汇率
+  }
+
+  // 今日涨跌（人民币）：用实时涨跌幅反推昨收，算每个持仓今天的变动。
+  function dayChangeCNY(h) {
+    const qty = parseFloat(h.qty);
+    if (!isFinite(qty)) return null;
+    const p = prices[h.symbol];
+    if (!p || !isFinite(p.price) || !isFinite(p.change)) return null;
+    const prevClose = p.price / (1 + p.change / 100);
+    const diff = p.price - prevClose;
+    const cat = CATS[h.cat] || CATS.us;
+    if (cat.currency === "CNY") return qty * diff;
+    if (!fx || !isFinite(fx.rate)) return null;
+    if (h.cat === "gold") return qty * diff * fx.rate / GOLD_GRAMS_PER_OUNCE;
+    return qty * diff * fx.rate;
+  }
+
+  /* ---------------- TradingView widget ---------------- */
+
+  function mountWidget(container, file, config) {
+    container.classList.add("tradingview-widget-container");
+    container.innerHTML = "";
+    const inner = document.createElement("div");
+    inner.className = "tradingview-widget-container__widget";
+    container.appendChild(inner);
+    const s = document.createElement("script");
+    s.type = "text/javascript";
+    s.async = true;
+    s.src = TV_EMBED + file + ".js";
+    s.textContent = JSON.stringify(config);
+    container.appendChild(s);
+  }
+
+  function quoteConfig(h) {
+    return {
+      symbol: h.symbol,
+      width: "100%",
+      height: 220,
+      isTransparent: true,
+      colorTheme: state.theme,
+      locale: "zh_CN",
+      dateRange: "1D",
+      largeChartUrl: "",
+    };
+  }
+
+  /* ---------------- 渲染 ---------------- */
+
+  function render() {
+    renderGrid();
+  }
+
+  function cardHTML(h) {
+    const cat = CATS[h.cat] || CATS.us;
+    const meta = [];
+    if (h.qty) meta.push("<b>" + esc(h.qty) + "</b> 份");
+    if (h.cost) meta.push("成本 <b>" + esc(h.cost) + "</b>");
+
+    return (
+      '<article class="card" data-id="' + esc(h.id) + '">' +
+        '<div class="card__head">' +
+          '<span class="badge" style="background:' + cat.color + ';color:#fff">' + esc(cat.name) + "</span>" +
+          '<div class="card__titles">' +
+            '<div class="card__title">' + esc(h.label || h.symbol) + "</div>" +
+            '<div class="card__sym">' + esc(h.symbol) + "</div>" +
+          "</div>" +
+          '<div class="card__head-right">' +
+            '<button class="card__menu" data-action="edit" title="编辑">✎</button>' +
+            '<button class="card__menu" data-action="del" title="删除">×</button>' +
+          "</div>" +
+        "</div>" +
+        '<div class="card__quote"><div class="quote-host" data-id="' + esc(h.id) + '"></div></div>' +
+        '<div class="card__live"><span class="live-price">现价 加载中…</span><span class="live-val">市值 —</span></div>' +
+        '<div class="card__pnl"><span class="pnl-cost">本金 —</span><span class="pnl-profit">盈亏 —</span></div>' +
+        '<div class="card__foot">' +
+          '<div class="card__meta">' + (meta.join(" · ") || "—") + "</div>" +
+          '<div class="card__foot-right">' +
+            '<button class="btn btn--ghost btn--sm" data-action="chart">图表</button>' +
+          "</div>" +
+        "</div>" +
+      "</article>"
+    );
+  }
+
+  function renderGrid() {
+    const grid = $("#grid");
+    const empty = $("#empty");
+    grid.innerHTML = "";
+
+    if (!state.holdings.length) {
+      empty.classList.remove("hidden");
+      return;
+    }
+    empty.classList.add("hidden");
+
+    CAT_ORDER.forEach(function (cat) {
+      const items = state.holdings.filter(function (h) { return h.cat === cat; });
+      if (!items.length) return;
+      const section = document.createElement("section");
+      section.className = "cat-section";
+      section.innerHTML =
+        '<header class="cat-section__head">' +
+          '<span class="cat-section__dot" style="background:' + CATS[cat].color + '"></span>' +
+          '<h3 class="cat-section__name">' + CATS[cat].name + "</h3>" +
+          '<span class="cat-section__count">' + items.length + " 项</span>" +
+          '<span class="cat-section__total" data-cat-total="' + cat + '">—</span>' +
+        "</header>" +
+        '<div class="cat-section__row">' + items.map(cardHTML).join("") + "</div>";
+      grid.appendChild(section);
+    });
+
+    grid.querySelectorAll(".quote-host").forEach(function (host) {
+      const h = state.holdings.find(function (x) { return x.id === host.dataset.id; });
+      if (h) mountWidget(host, "embed-widget-mini-symbol-overview", quoteConfig(h));
+    });
+  }
+
+  function renderLive() {
+    document.querySelectorAll(".card").forEach(function (card) {
+      const h = state.holdings.find(function (x) { return x.id === card.dataset.id; });
+      if (!h) return;
+      const live = card.querySelector(".card__live");
+      if (!live) return;
+      const p = prices[h.symbol];
+      const hasPrice = p && isFinite(p.price);
+      const hasQty = isFinite(parseFloat(h.qty));
+      const v = valueCNY(h);
+
+      let left, right;
+      if (!hasPrice) {
+        left = "无行情";
+        right = "未计入";
+      } else if (!hasQty) {
+        left = "现价 " + p.price.toLocaleString("zh-CN", { maximumFractionDigits: 4 });
+        right = "未填数量";
+      } else {
+        left = "现价 " + p.price.toLocaleString("zh-CN", { maximumFractionDigits: 4 });
+        right = "市值 " + fmtMoney(v);
+      }
+      live.innerHTML =
+        '<span class="live-price">' + left + "</span>" +
+        '<span class="live-val">' + right + "</span>";
+
+      // 成本 / 盈亏 / 盈亏比例
+      const pnl = card.querySelector(".card__pnl");
+      if (pnl) {
+        const pnlCost = pnl.querySelector(".pnl-cost");
+        const pnlProfit = pnl.querySelector(".pnl-profit");
+        const c = costCNY(h);
+        const v = valueCNY(h);
+        if (c != null && v != null) {
+          const prof = v - c;
+          const pct = c > 0 ? (prof / c) * 100 : 0;
+          pnlCost.textContent = "本金 " + fmtCompact(c);
+          pnlProfit.textContent = "盈亏 " + fmtSigned(prof) + " (" + (prof > 0 ? "+" : "") + pct.toFixed(2) + "%)";
+          pnlProfit.className = "pnl-profit" + (prof > 0 ? " change-up" : prof < 0 ? " change-down" : "");
+        } else {
+          pnlCost.textContent = "本金 —";
+          pnlProfit.textContent = "盈亏 —";
+          pnlProfit.className = "pnl-profit";
+        }
+      }
+    });
+  }
+
+  /* ---------------- 总资产汇总 ---------------- */
+
+  function renderSummary() {
+    const summary = $("#summary");
+    if (!state.holdings.length) { summary.hidden = true; return; }
+    summary.hidden = false;
+
+    const totals = { us: 0, cn: 0, crypto: 0, gold: 0 };
+    let total = 0;
+    state.holdings.forEach(function (h) {
+      const v = valueCNY(h);
+      if (v != null) { totals[h.cat] += v; total += v; }
+    });
+
+    let dayChange = 0;
+    state.holdings.forEach(function (h) {
+      const d = dayChangeCNY(h);
+      if (d != null) dayChange += d;
+    });
+
+    $("#sum-total").textContent = total > 0 ? fmtCompact(total) : "¥ 0";
+
+    const prevTotal = total - dayChange;
+    let changeText = "今日 " + fmtSigned(dayChange);
+    if (prevTotal > 0) {
+      changeText += " (" + (dayChange > 0 ? "+" : "") + ((dayChange / prevTotal) * 100).toFixed(2) + "%)";
+    }
+    const changeEl = $("#sum-change");
+    changeEl.textContent = changeText;
+    changeEl.className = "summary__change" + (dayChange > 0 ? " change-up" : dayChange < 0 ? " change-down" : "");
+
+    // 本金 / 盈亏
+    let totalCost = 0, profit = 0, profitCost = 0;
+    state.holdings.forEach(function (h) {
+      const c = costCNY(h);
+      if (c == null) return;
+      totalCost += c;
+      const v = valueCNY(h);
+      if (v != null) { profit += v - c; profitCost += c; }
+    });
+    $("#sum-principal").textContent = "本金 " + (totalCost > 0 ? fmtCompact(totalCost) : "—");
+    const profitEl = $("#sum-profit");
+    if (profitCost > 0) {
+      const pct = (profit / profitCost) * 100;
+      profitEl.textContent = "盈亏 " + fmtSigned(profit) + " (" + (profit > 0 ? "+" : "") + pct.toFixed(2) + "%)";
+      profitEl.className = "summary__profit" + (profit > 0 ? " change-up" : profit < 0 ? " change-down" : "");
+    } else {
+      profitEl.textContent = "盈亏 —";
+      profitEl.className = "summary__profit";
+    }
+
+    // 环形图
+    const R = 80, CX = 100, CY = 100, CIRC = 2 * Math.PI * R;
+    let inner = '<circle class="donut-track" cx="100" cy="100" r="80" fill="none" stroke-width="26"></circle>';
+    let offset = 0;
+    if (total > 0) {
+      CAT_ORDER.forEach(function (c) {
+        const v = totals[c];
+        if (!v || v <= 0) return;
+        const len = (v / total) * CIRC;
+        inner +=
+          '<circle cx="100" cy="100" r="80" fill="none" stroke="' + CATS[c].color + '" stroke-width="26"' +
+          ' stroke-dasharray="' + len + " " + (CIRC - len) + '"' +
+          ' stroke-dashoffset="' + (-offset) + '"' +
+          ' transform="rotate(-90 100 100)"></circle>';
+        offset += len;
+      });
+    }
+    $("#donut").innerHTML = inner;
+
+    // 图例
+    $("#legend").innerHTML = CAT_ORDER.map(function (c) {
+      const v = totals[c];
+      const pct = total > 0 ? Math.round((v / total) * 100) : 0;
+      return (
+        '<li class="legend__item">' +
+          '<span class="legend__dot" style="background:' + CATS[c].color + '"></span>' +
+          '<span class="legend__name">' + CATS[c].name + "</span>" +
+          '<span class="legend__val">' + fmtMoney(v) + "</span>" +
+          '<span class="legend__pct">' + pct + "%</span>" +
+        "</li>"
+      );
+    }).join("");
+
+    // 各分类区块的小计
+    CAT_ORDER.forEach(function (c) {
+      const el = document.querySelector('[data-cat-total="' + c + '"]');
+      if (el) el.textContent = fmtCompact(totals[c]);
+    });
+
+    // 元信息
+    let meta;
+    if (!fx) {
+      meta = "加载行情中…";
+    } else {
+      meta = "1 美元 ≈ " + fx.rate.toFixed(4) + " 人民币" + (fx.fallback ? "（估算）" : "") + " · ";
+      meta += "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      const excluded = state.holdings.length - state.holdings.filter(function (h) { return valueCNY(h) != null; }).length;
+      if (excluded > 0) meta += " · " + excluded + " 项未计入（缺数量或无行情）";
+      else if (total === 0) meta += " · 填写持仓数量后自动计算总资产";
+    }
+    $("#sum-meta").textContent = meta;
+  }
+
+  /* ---------------- 弹窗 ---------------- */
+
+  function openModal(id) {
+    const m = document.getElementById(id);
+    m.hidden = false;
+    document.body.style.overflow = "hidden";
+    if (id === "modal-backup") {
+      $("#backup-area").value = JSON.stringify(state, null, 2);
+    }
+  }
+
+  function closeModal(id) {
+    document.getElementById(id).hidden = true;
+    document.body.style.overflow = "";
+    if (id === "modal-chart") $("#chart-host").innerHTML = "";
+  }
+
+  /* ---------------- 持仓操作 ---------------- */
+
+  function deleteHolding(id) {
+    const h = state.holdings.find(function (x) { return x.id === id; });
+    const name = h ? (h.label || h.symbol) : "这条持仓";
+    if (!window.confirm("删除「" + name + "」？")) return;
+    state.holdings = state.holdings.filter(function (x) { return x.id !== id; });
+    save();
+    render();
+    renderSummary();
+    toast("已删除「" + name + "」");
+  }
+
+  function openEdit(id) {
+    const h = state.holdings.find(function (x) { return x.id === id; });
+    if (!h) return;
+    $("#edit-title").textContent = "编辑持仓";
+    $("#f-id").value = h.id;
+    $("#f-label").value = h.label;
+    $("#f-symbol").value = h.symbol;
+    $("#f-qty").value = h.qty;
+    $("#f-cost").value = h.cost;
+    selectCat(h.cat);
+    openModal("modal-edit");
+  }
+
+  function resetForm() {
+    $("#edit-title").textContent = "添加持仓";
+    $("#f-id").value = "";
+    $("#f-label").value = "";
+    $("#f-symbol").value = "";
+    $("#f-qty").value = "";
+    $("#f-cost").value = "";
+  }
+
+  function openChart(id) {
+    const h = state.holdings.find(function (x) { return x.id === id; });
+    if (!h) return;
+    $("#chart-title").textContent = (h.label || h.symbol) + " · " + h.symbol;
+    openModal("modal-chart");
+    mountWidget($("#chart-host"), "embed-widget-advanced-chart", {
+      autosize: true,
+      symbol: h.symbol,
+      interval: "D",
+      timezone: "Asia/Shanghai",
+      theme: state.theme,
+      style: "1",
+      locale: "zh_CN",
+      allow_symbol_change: true,
+      support_host: "https://www.tradingview.com",
+    });
+  }
+
+  /* ---------------- 表单分类 ---------------- */
+
+  function renderCats() {
+    const wrap = $("#f-cats");
+    wrap.innerHTML = "";
+    Object.keys(CATS).forEach(function (key) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "cat-btn";
+      b.textContent = CATS[key].name;
+      b.dataset.cat = key;
+      b.addEventListener("click", function () { selectCat(key); });
+      wrap.appendChild(b);
+    });
+  }
+
+  function selectCat(key) {
+    formCat = key;
+    document.querySelectorAll("#f-cats .cat-btn").forEach(function (b) {
+      const on = b.dataset.cat === key;
+      b.classList.toggle("is-active", on);
+      b.style.background = on ? CATS[key].color : "";
+      b.style.color = on ? "#fff" : "";
+    });
+    $("#f-symbol-hint").textContent = SYMBOL_HINTS[key];
+    $("#f-qty-label").textContent = CATS[key].qtyUnit ? "数量（" + CATS[key].qtyUnit + "）" : "数量（可选）";
+    $("#f-cost-label").textContent = "成本价（可选，" + (CATS[key].costUnit || "本币") + "）";
+  }
+
+  /* ---------------- 符号自动联想 ---------------- */
+
+  function showSuggest(query) {
+    const q = query.trim().toLowerCase();
+    const box = $("#symbol-suggest");
+    if (!q) { hideSuggest(); return; }
+    const db = window.SYMBOL_DB || [];
+    suggestResults = db
+      .filter(function (e) {
+        return e[0].toLowerCase().indexOf(q) !== -1 || e[1].toLowerCase().indexOf(q) !== -1;
+      })
+      .sort(function (a, b) {
+        const ap = a[0].toLowerCase().indexOf(q) === 0 ? 0 : 1;
+        const bp = b[0].toLowerCase().indexOf(q) === 0 ? 0 : 1;
+        return ap - bp;
+      })
+      .slice(0, 8);
+    suggestIndex = -1;
+    if (!suggestResults.length) { hideSuggest(); return; }
+
+    box.innerHTML = suggestResults.map(function (m, i) {
+      const cat = CATS[m[2]] || CATS.us;
+      return (
+        '<button type="button" class="suggest__item" data-i="' + i + '">' +
+          '<span class="suggest__id">' + esc(m[0]) + "</span>" +
+          '<span class="suggest__name">' + esc(m[1]) + "</span>" +
+          '<span class="suggest__cat" style="background:' + cat.color + '">' + esc(cat.name) + "</span>" +
+        "</button>"
+      );
+    }).join("");
+    box.hidden = false;
+  }
+
+  function hideSuggest() {
+    $("#symbol-suggest").hidden = true;
+    suggestResults = [];
+    suggestIndex = -1;
+  }
+
+  function pickSuggest(m) {
+    $("#f-symbol").value = m[0];
+    if (!$("#f-label").value.trim()) $("#f-label").value = m[1];
+    selectCat(m[2]);
+    hideSuggest();
+  }
+
+  function highlightSuggest(items) {
+    items.forEach(function (it, idx) {
+      it.classList.toggle("is-active", idx === suggestIndex);
+    });
+  }
+
+  /* ---------------- 主题 ---------------- */
+
+  function applyTheme() {
+    document.documentElement.setAttribute("data-theme", state.theme);
+    $('meta[name="theme-color"]').setAttribute(
+      "content",
+      state.theme === "dark" ? "#0e1117" : "#f4f6fa"
+    );
+  }
+
+  /* ---------------- Toast ---------------- */
+
+  let toastTimer;
+  function toast(msg) {
+    const t = $("#toast");
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, 2200);
+  }
+
+  /* ---------------- 事件绑定 ---------------- */
+
+  function bindEvents() {
+    $("#btn-add").addEventListener("click", function () {
+      resetForm();
+      openModal("modal-edit");
+    });
+    $("#btn-empty-add").addEventListener("click", function () {
+      resetForm();
+      openModal("modal-edit");
+    });
+
+    $("#btn-theme").addEventListener("click", function () {
+      state.theme = state.theme === "dark" ? "light" : "dark";
+      applyTheme();
+      save();
+      render();
+      renderSummary();
+    });
+
+    $("#btn-refresh").addEventListener("click", function () {
+      $("#sum-meta").textContent = "刷新中…";
+      refreshPrices();
+    });
+
+    $("#btn-backup").addEventListener("click", function () { openModal("modal-backup"); });
+    $("#backup-export").addEventListener("click", function () {
+      $("#backup-area").value = JSON.stringify(state, null, 2);
+      toast("已导出到文本框");
+    });
+    $("#backup-copy").addEventListener("click", function () {
+      const text = $("#backup-area").value || JSON.stringify(state, null, 2);
+      navigator.clipboard.writeText(text).then(
+        function () { toast("已复制到剪贴板"); },
+        function () { toast("复制失败，请手动复制"); }
+      );
+    });
+    $("#backup-download").addEventListener("click", function () {
+      const json = JSON.stringify(state, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "investtracker-holdings-" + new Date().toISOString().slice(0, 10) + ".json";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast("已下载 JSON 文件");
+    });
+    $("#backup-import").addEventListener("click", function () {
+      try {
+        const data = JSON.parse($("#backup-area").value);
+        state = normalize(data);
+        save();
+        applyTheme();
+        render();
+        closeModal("modal-backup");
+        toast("导入成功");
+        refreshPrices();
+      } catch (e) {
+        toast("导入失败：JSON 格式不正确");
+      }
+    });
+
+    $("#edit-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      const id = $("#f-id").value;
+      const symbol = $("#f-symbol").value.trim();
+      const label = $("#f-label").value.trim();
+      const qty = $("#f-qty").value.trim();
+      const cost = $("#f-cost").value.trim();
+
+      if (!symbol) { toast("请填写 TradingView 代码"); return; }
+
+      if (id) {
+        const h = state.holdings.find(function (x) { return x.id === id; });
+        if (h) Object.assign(h, { cat: formCat, symbol: symbol, label: label, qty: qty, cost: cost });
+      } else {
+        state.holdings.push({ id: genId(), cat: formCat, symbol: symbol, label: label, qty: qty, cost: cost });
+      }
+      save();
+      render();
+      closeModal("modal-edit");
+      toast(id ? "已更新" : "已添加");
+      refreshPrices();
+    });
+
+    $("#f-symbol").addEventListener("input", function () {
+      showSuggest(this.value);
+    });
+    $("#f-symbol").addEventListener("keydown", function (e) {
+      const items = $("#symbol-suggest").querySelectorAll(".suggest__item");
+      if (!items.length) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        suggestIndex = (suggestIndex + 1) % items.length;
+        highlightSuggest(items);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        suggestIndex = (suggestIndex - 1 + items.length) % items.length;
+        highlightSuggest(items);
+      } else if (e.key === "Enter") {
+        if (suggestIndex >= 0 && suggestResults[suggestIndex]) {
+          e.preventDefault();
+          pickSuggest(suggestResults[suggestIndex]);
+        }
+      } else if (e.key === "Escape") {
+        hideSuggest();
+      }
+    });
+    $("#symbol-suggest").addEventListener("mousedown", function (e) {
+      const btn = e.target.closest(".suggest__item");
+      if (!btn) return;
+      const i = parseInt(btn.dataset.i, 10);
+      if (suggestResults[i]) pickSuggest(suggestResults[i]);
+    });
+
+    $("#grid").addEventListener("click", function (e) {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      const card = btn.closest(".card");
+      if (!card) return;
+      const id = card.dataset.id;
+      if (btn.dataset.action === "del") deleteHolding(id);
+      else if (btn.dataset.action === "edit") openEdit(id);
+      else if (btn.dataset.action === "chart") openChart(id);
+    });
+
+    document.addEventListener("click", function (e) {
+      const c = e.target.closest("[data-close]");
+      if (c) closeModal(c.dataset.close);
+    });
+
+    document.addEventListener("click", function (e) {
+      if (!e.target.closest(".suggest-wrap")) hideSuggest();
+    });
+
+    $("#hint-close").addEventListener("click", function () {
+      $("#hint").classList.add("hidden");
+    });
+  }
+
+  /* ---------------- 启动 ---------------- */
+
+  function init() {
+    const hadData = !!safeGet(STORAGE_KEY);
+    state = load();
+    applyTheme();
+    renderCats();
+    selectCat("us");
+    bindEvents();
+    render();
+    renderSummary();
+    refreshPrices();
+    setInterval(refreshPrices, REFRESH_MS);
+    if (!hadData) $("#hint").classList.remove("hidden");
+  }
+
+  init();
+})();

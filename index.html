@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1117" />
+  <title>InvestTracker · 个人投资行情面板</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar__brand">
+      <div class="logo" aria-hidden="true">◧</div>
+      <div>
+        <h1>InvestTracker</h1>
+        <p class="topbar__sub">美股 · A股 · 虚拟币 · 黄金</p>
+      </div>
+    </div>
+    <div class="topbar__actions">
+      <button class="btn btn--ghost" id="btn-backup" title="导出 / 导入数据">备份</button>
+      <button class="btn btn--ghost btn--icon" id="btn-theme" title="切换深浅色">
+        <span class="theme-icon theme-icon--light" aria-hidden="true">☀</span>
+        <span class="theme-icon theme-icon--dark" aria-hidden="true">☾</span>
+      </button>
+      <button class="btn btn--primary" id="btn-add">＋ 添加持仓</button>
+    </div>
+  </header>
+
+  <div id="hint" class="hint hidden">
+    <span>已载入示例持仓，方便你确认行情加载正常。点卡片右上角 <b>×</b> 即可删除，全部删完就能添加你自己的持仓。</span>
+    <button class="hint__close" id="hint-close" aria-label="关闭">×</button>
+  </div>
+
+  <main class="wrap">
+    <section class="summary" id="summary" hidden>
+      <div class="summary__donut-wrap">
+        <svg class="donut" id="donut" viewBox="0 0 200 200" role="img" aria-label="四项资产分布"></svg>
+        <div class="donut__center">
+          <span class="donut__total" id="sum-total">¥ 0</span>
+          <span class="donut__label">总资产</span>
+        </div>
+      </div>
+      <div class="summary__side">
+        <h2 class="summary__title">四项投资 · 总资产（人民币）</h2>
+        <div class="summary__change" id="sum-change">今日 —</div>
+        <div class="summary__cost">
+          <span id="sum-principal">本金 —</span>
+          <span class="summary__profit" id="sum-profit">盈亏 —</span>
+        </div>
+        <ul class="legend" id="legend"></ul>
+        <div class="summary__meta">
+          <span id="sum-meta">加载行情中…</span>
+          <button class="btn btn--ghost btn--sm" id="btn-refresh">刷新</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="grid"></div>
+
+    <div id="empty" class="empty hidden">
+      <div class="empty__icon" aria-hidden="true">📈</div>
+      <h2>还没有持仓</h2>
+      <p>点击右上角「添加持仓」，填入 TradingView 代码即可看到实时行情。</p>
+      <button class="btn btn--primary" id="btn-empty-add">＋ 添加第一笔持仓</button>
+    </div>
+  </main>
+
+  <!-- 添加 / 编辑持仓 -->
+  <div class="modal" id="modal-edit" hidden>
+    <div class="modal__backdrop" data-close="modal-edit"></div>
+    <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+      <header class="modal__head">
+        <h2 id="edit-title">添加持仓</h2>
+        <button class="btn btn--ghost btn--icon" data-close="modal-edit" aria-label="关闭">×</button>
+      </header>
+      <form id="edit-form" class="form">
+        <input type="hidden" id="f-id" />
+
+        <fieldset class="form__cats" id="f-cats"></fieldset>
+
+        <label class="field">
+          <span>名称（可选）</span>
+          <input type="text" id="f-label" placeholder="例如：苹果、贵州茅台、比特币" />
+        </label>
+
+        <label class="field">
+          <span>TradingView 代码 <b class="req">*</b></span>
+          <div class="suggest-wrap">
+            <input type="text" id="f-symbol" placeholder="例如：NASDAQ:AAPL" spellcheck="false" autocapitalize="off" autocomplete="off" />
+            <div class="suggest" id="symbol-suggest" hidden></div>
+          </div>
+          <small class="field__hint" id="f-symbol-hint"></small>
+        </label>
+
+        <div class="form__row">
+          <label class="field">
+            <span id="f-qty-label">数量（可选）</span>
+            <input type="text" id="f-qty" inputmode="decimal" placeholder="例如：10" />
+          </label>
+          <label class="field">
+            <span id="f-cost-label">成本价（可选）</span>
+            <input type="text" id="f-cost" inputmode="decimal" placeholder="例如：180.5" />
+          </label>
+        </div>
+
+        <footer class="modal__foot">
+          <button type="button" class="btn btn--ghost" data-close="modal-edit">取消</button>
+          <button type="submit" class="btn btn--primary">保存</button>
+        </footer>
+      </form>
+    </div>
+  </div>
+
+  <!-- 完整图表 -->
+  <div class="modal" id="modal-chart" hidden>
+    <div class="modal__backdrop" data-close="modal-chart"></div>
+    <div class="modal__panel modal__panel--wide" role="dialog" aria-modal="true" aria-labelledby="chart-title">
+      <header class="modal__head">
+        <h2 id="chart-title">图表</h2>
+        <button class="btn btn--ghost btn--icon" data-close="modal-chart" aria-label="关闭">×</button>
+      </header>
+      <div class="chart-host" id="chart-host"></div>
+    </div>
+  </div>
+
+  <!-- 备份 / 导入 -->
+  <div class="modal" id="modal-backup" hidden>
+    <div class="modal__backdrop" data-close="modal-backup"></div>
+    <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="backup-title">
+      <header class="modal__head">
+        <h2 id="backup-title">备份 / 导入</h2>
+        <button class="btn btn--ghost btn--icon" data-close="modal-backup" aria-label="关闭">×</button>
+      </header>
+      <p class="backup__note">持仓数据只保存在当前浏览器的 localStorage 里。要在电脑和手机之间同步，可以导出后粘贴到另一台设备导入。</p>
+      <textarea id="backup-area" class="backup__area" rows="8" spellcheck="false" placeholder="{}"></textarea>
+      <footer class="modal__foot modal__foot--wrap">
+        <button class="btn btn--ghost" id="backup-export">导出到文本框</button>
+        <button class="btn btn--ghost" id="backup-copy">复制</button>
+        <button class="btn btn--primary" id="backup-download">⬇ 下载 JSON 文件</button>
+        <button class="btn btn--ghost" id="backup-import">导入并替换</button>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="symbols.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
