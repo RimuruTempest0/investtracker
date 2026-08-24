@@ -11,6 +11,8 @@
   const GOLD_GRAMS_PER_OUNCE = 31.1035;
   const REFRESH_MS = 10000;
   const FALLBACK_USDCNY = 7.2;
+  const TD_BASE = "https://api.twelvedata.com/quote";   // 美股实时行情（CORS 允许，按符号计费）
+  const TD_REFRESH_MS = 60000;                          // 美股刷新间隔；免费档 800 积分/天，按符号扣
 
   const CATS = {
     us:     { name: "美股",   color: "#2962ff", region: "america", currency: "USD", costUnit: "美元" },
@@ -117,6 +119,7 @@
     return {
       theme: data && data.theme === "light" ? "light" : "dark",
       currency: data && data.currency === "USD" ? "USD" : "CNY",
+      tdKey: data && typeof data.tdKey === "string" ? data.tdKey : "",
       holdings: holdings,
     };
   }
@@ -189,12 +192,65 @@
     return MAP[ex] || null;
   }
 
+  /* ---------------- 美股实时行情（Twelve Data） ----------------
+   * TradingView scanner 对美股返回约 15 分钟延迟数据；Twelve Data 免费版是实时美股，
+   * 但按符号计 800 积分/天。因此美股单独走这里（刷新节奏更慢），其余资产仍走 scanner。 */
+
+  // NASDAQ:AAPL -> AAPL ; NYSE:BRK.B -> BRK.B（去掉交易所前缀，Twelve Data 只认裸 ticker）
+  function toTDSymbol(symbol) {
+    const parts = String(symbol).split(":");
+    return parts[parts.length - 1];
+  }
+
+  function fetchTD(symbols) {
+    if (!state.tdKey || !symbols.length) return Promise.resolve({});
+    // 逐个转义再以逗号拼接：encodeURIComponent 会把逗号转成 %2C，必须保留逗号分隔符。
+    const q = symbols.map(function (s) { return encodeURIComponent(toTDSymbol(s)); }).join(",");
+    return fetch(TD_BASE + "?symbol=" + q + "&apikey=" + encodeURIComponent(state.tdKey))
+      .then(function (res) { return res.ok ? res.json() : Promise.reject(); })
+      .then(function (json) {
+        const out = {};
+        // 多符号返回数组，单符号返回对象
+        const list = Array.isArray(json) ? json : [json];
+        list.forEach(function (r) {
+          if (r && r.symbol && isFinite(parseFloat(r.close)) && isFinite(parseFloat(r.percent_change))) {
+            // 用原始符号（带交易所前缀）作为 prices 的 key，需反向匹配
+            const full = symbols.find(function (s) { return toTDSymbol(s) === r.symbol; });
+            if (full) out[full] = { price: parseFloat(r.close), change: parseFloat(r.percent_change) };
+          }
+        });
+        return out;
+      })
+      .catch(function () { return {}; });
+  }
+
+  function refreshTD() {
+    if (!state.tdKey || document.hidden) return Promise.resolve();
+    const seen = {};
+    const syms = [];
+    state.holdings.forEach(function (h) {
+      if (seen[h.symbol]) return;
+      if (CATS[h.cat] && CATS[h.cat].region === "america") {
+        seen[h.symbol] = true;
+        syms.push(h.symbol);
+      }
+    });
+    if (!syms.length) return Promise.resolve();
+    return fetchTD(syms).then(function (m) {
+      Object.keys(m).forEach(function (sym) { prices[sym] = m[sym]; });
+      renderLive();
+      renderSummary();
+    });
+  }
+
   function refreshPrices() {
     // 按交易所区域分组去重，每个区域发一次批量请求，替代「每个持仓一个请求」。
     const seen = {};
     const byRegion = {};
     state.holdings.forEach(function (h) {
       if (seen[h.symbol]) return;
+      // 已接入实时接口时，美股（america 区）不在 scanner 抓取，避免 15 分钟延迟数据覆盖实时值。
+      if (state.tdKey && CATS[h.cat] && CATS[h.cat].region === "america") return;
       seen[h.symbol] = true;
       const region = regionFor(h.symbol) || (CATS[h.cat] && CATS[h.cat].region) || "america";
       (byRegion[region] = byRegion[region] || []).push(h.symbol);
@@ -505,6 +561,7 @@
     } else {
       meta = "1 美元 ≈ " + fx.rate.toFixed(4) + " 人民币" + (fx.fallback ? "（估算）" : "") + " · ";
       meta += "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      if (state.tdKey) meta += " · 美股已接入实时";
       const excluded = state.holdings.length - state.holdings.filter(function (h) { return valueCNY(h) != null; }).length;
       if (excluded > 0) meta += " · " + excluded + " 项未计入（缺数量或无行情）";
       else if (total === 0) meta += " · 填写持仓数量后自动计算总资产";
@@ -718,6 +775,20 @@
       renderSummary();
     });
 
+    $("#btn-settings").addEventListener("click", function () {
+      $("#td-key").value = state.tdKey || "";
+      openModal("modal-settings");
+    });
+    $("#settings-form").addEventListener("submit", function (e) {
+      e.preventDefault();
+      state.tdKey = $("#td-key").value.trim();
+      save();
+      closeModal("modal-settings");
+      toast(state.tdKey ? "已接入美股实时行情" : "已清除，美股回到延迟行情");
+      refreshPrices();
+      refreshTD();
+    });
+
     $("#btn-refresh").addEventListener("click", function () {
       $("#sum-meta").textContent = "刷新中…";
       refreshPrices();
@@ -854,7 +925,12 @@
     render();
     renderSummary();
     refreshPrices();
+    refreshTD();
     setInterval(refreshPrices, REFRESH_MS);
+    setInterval(refreshTD, TD_REFRESH_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) { refreshPrices(); refreshTD(); }
+    });
     if (!hadData) $("#hint").classList.remove("hidden");
   }
 

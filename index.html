@@ -17,6 +17,7 @@
       </div>
     </div>
     <div class="topbar__actions">
+      <button class="btn btn--ghost btn--icon" id="btn-settings" title="设置（美股实时行情 API Key）">⚙</button>
       <button class="btn btn--ghost" id="btn-backup" title="导出 / 导入数据">备份</button>
       <button class="btn btn--ghost btn--icon" id="btn-currency" title="切换统计货币（人民币 / 美元）">¥</button>
       <button class="btn btn--ghost btn--icon" id="btn-theme" title="切换深浅色">
@@ -140,6 +141,28 @@
         <button class="btn btn--primary" id="backup-download">⬇ 下载 JSON 文件</button>
         <button class="btn btn--ghost" id="backup-import">导入并替换</button>
       </footer>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="modal" id="modal-settings" hidden>
+    <div class="modal__backdrop" data-close="modal-settings"></div>
+    <div class="modal__panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="modal__head">
+        <h2 id="settings-title">设置</h2>
+        <button class="btn btn--ghost btn--icon" data-close="modal-settings" aria-label="关闭">×</button>
+      </header>
+      <form id="settings-form" class="form">
+        <label class="field">
+          <span>Twelve Data API Key（美股实时行情）</span>
+          <input type="password" id="td-key" placeholder="粘贴你的免费 API Key" spellcheck="false" autocomplete="off" />
+          <small class="field__hint">免费注册：twelvedata.com/pricing 选 Basic 免费档，即可拿到 API Key。<br />填一次后保存在本机浏览器，不会上传。美股约每 1 分钟刷新一次（免费档 800 积分/天，按符号计费）。</small>
+        </label>
+        <footer class="modal__foot">
+          <button type="button" class="btn btn--ghost" data-close="modal-settings">取消</button>
+          <button type="submit" class="btn btn--primary">保存</button>
+        </footer>
+      </form>
     </div>
   </div>
 
