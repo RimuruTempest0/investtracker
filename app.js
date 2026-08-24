@@ -58,19 +58,36 @@
 
   function $(sel) { return document.querySelector(sel); }
 
-  function fmtMoney(n) {
-    return "¥ " + n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // 统计显示货币（"CNY" | "USD"），金额函数收到的参数一律是「人民币」金额，这里再换算。
+  function curSymbol() {
+    return (state && state.currency === "USD") ? "$" : "¥";
   }
 
-  function fmtCompact(n) {
-    if (n >= 1e8) return "¥ " + (n / 1e8).toFixed(2) + " 亿";
-    if (n >= 1e4) return "¥ " + (n / 1e4).toFixed(2) + " 万";
-    return fmtMoney(n);
+  function inDisplay(nCNY) {
+    if (state && state.currency === "USD") {
+      const rate = (fx && isFinite(fx.rate)) ? fx.rate : FALLBACK_USDCNY;
+      return nCNY / rate;
+    }
+    return nCNY;
   }
 
-  function fmtSigned(n) {
-    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
-    return sign + "¥ " + Math.abs(n).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function fmtMoney(nCNY) {
+    const v = inDisplay(nCNY);
+    return curSymbol() + " " + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtCompact(nCNY) {
+    const v = inDisplay(nCNY);
+    const s = curSymbol();
+    if (v >= 1e8) return s + " " + (v / 1e8).toFixed(2) + " 亿";
+    if (v >= 1e4) return s + " " + (v / 1e4).toFixed(2) + " 万";
+    return s + " " + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtSigned(nCNY) {
+    const sign = nCNY > 0 ? "+" : nCNY < 0 ? "-" : "";
+    const v = inDisplay(Math.abs(nCNY));
+    return sign + curSymbol() + " " + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
   /* ---------------- 存储 ---------------- */
@@ -99,6 +116,7 @@
 
     return {
       theme: data && data.theme === "light" ? "light" : "dark",
+      currency: data && data.currency === "USD" ? "USD" : "CNY",
       holdings: holdings,
     };
   }
@@ -381,7 +399,7 @@
       if (d != null) dayChange += d;
     });
 
-    $("#sum-total").textContent = total > 0 ? fmtCompact(total) : "¥ 0";
+    $("#sum-total").textContent = total > 0 ? fmtCompact(total) : curSymbol() + " 0";
 
     const prevTotal = total - dayChange;
     let changeText = "今日 " + fmtSigned(dayChange);
@@ -626,6 +644,11 @@
     );
   }
 
+  function updateCurrencyBtn() {
+    const b = $("#btn-currency");
+    if (b) b.textContent = (state && state.currency === "USD") ? "$" : "¥";
+  }
+
   /* ---------------- Toast ---------------- */
 
   let toastTimer;
@@ -654,6 +677,15 @@
       applyTheme();
       save();
       render();
+      renderSummary();
+    });
+
+    $("#btn-currency").addEventListener("click", function () {
+      state.currency = state.currency === "USD" ? "CNY" : "USD";
+      save();
+      updateCurrencyBtn();
+      render();
+      renderLive();
       renderSummary();
     });
 
@@ -786,6 +818,7 @@
     const hadData = !!safeGet(STORAGE_KEY);
     state = load();
     applyTheme();
+    updateCurrencyBtn();
     renderCats();
     selectCat("us");
     bindEvents();
