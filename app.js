@@ -9,7 +9,7 @@
   const SCANNER = "https://scanner.tradingview.com/";
   const TV_EMBED = "https://s3.tradingview.com/external-embedding/";
   const GOLD_GRAMS_PER_OUNCE = 31.1035;
-  const REFRESH_MS = 60000;
+  const REFRESH_MS = 10000;
   const FALLBACK_USDCNY = 7.2;
 
   const CATS = {
@@ -150,6 +150,29 @@
     return null;
   }
 
+  // 批量查询：一次请求取回同一区域内的多个符号，按返回行的 s（符号名）对应回结果，
+  // 大幅减少请求数，从而允许更快的刷新间隔而不被限流。
+  async function fetchBatch(region, symbols) {
+    if (!symbols || !symbols.length) return {};
+    const res = await fetch(SCANNER + region + "/scan", {
+      method: "POST",
+      // 不显式设 Content-Type，浏览器会用 text/plain，避免触发 CORS 预检失败。
+      body: JSON.stringify({
+        symbols: { tickers: symbols, query: { types: [] } },
+        columns: ["name", "close", "change"],
+      }),
+    });
+    if (!res.ok) return {};
+    const json = await res.json();
+    const out = {};
+    (json && json.data ? json.data : []).forEach(function (row) {
+      if (row && row.s && row.d && isFinite(row.d[1])) {
+        out[row.s] = { price: row.d[1], change: row.d[2] };
+      }
+    });
+    return out;
+  }
+
   // 根据交易所前缀决定 scanner 区域，找不到就用类别默认区域。
   function regionFor(symbol) {
     const ex = String(symbol).split(":")[0].toUpperCase();
@@ -166,27 +189,33 @@
     return MAP[ex] || null;
   }
 
-  async function refreshPrices() {
+  function refreshPrices() {
+    // 按交易所区域分组去重，每个区域发一次批量请求，替代「每个持仓一个请求」。
     const seen = {};
-    const tasks = state.holdings.map(function (h) {
-      if (seen[h.symbol]) return Promise.resolve();
+    const byRegion = {};
+    state.holdings.forEach(function (h) {
+      if (seen[h.symbol]) return;
       seen[h.symbol] = true;
       const region = regionFor(h.symbol) || (CATS[h.cat] && CATS[h.cat].region) || "america";
-      return fetchSymbol(h.symbol, region)
-        .then(function (p) { if (p) prices[h.symbol] = p; })
-        .catch(function () {});
+      (byRegion[region] = byRegion[region] || []).push(h.symbol);
     });
-    await Promise.all(tasks);
 
-    try {
-      const p = await fetchSymbol("FX_IDC:USDCNY", "forex");
+    return Promise.all(Object.keys(byRegion).map(function (region) {
+      return fetchBatch(region, byRegion[region])
+        .then(function (m) {
+          Object.keys(m).forEach(function (sym) { prices[sym] = m[sym]; });
+        })
+        .catch(function () {});
+    })).then(function () {
+      return fetchSymbol("FX_IDC:USDCNY", "forex");
+    }).then(function (p) {
       fx = p ? { rate: p.price, fallback: false } : { rate: FALLBACK_USDCNY, fallback: true };
-    } catch (e) {
+    }).catch(function () {
       fx = { rate: FALLBACK_USDCNY, fallback: true };
-    }
-
-    renderLive();
-    renderSummary();
+    }).then(function () {
+      renderLive();
+      renderSummary();
+    });
   }
 
   /* ---------------- 估值 ---------------- */
