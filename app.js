@@ -46,6 +46,8 @@
   let formCat = "us";
   const prices = {};   // symbol -> { price, change }
   let fx = null;       // { rate, fallback }
+  let lastSuccessAt = null;   // 最近一次真正取到行情的毫秒时间戳（区分"发起刷新"和"拿到数据"）
+  let lastAttemptAt = 0;      // 最近一次发起 scanner 刷新的时间戳，用于判断最近一次是否失败
   let suggestResults = [];
   let suggestIndex = -1;
 
@@ -98,6 +100,16 @@
     const sign = nCNY > 0 ? "+" : nCNY < 0 ? "-" : "";
     const v = inDisplay(Math.abs(nCNY));
     return sign + curSymbol() + " " + v.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function agoText(ms) {
+    if (!isFinite(ms)) return "很久前";
+    const mins = Math.floor(ms / 60000);
+    if (mins < 1) return "刚刚";
+    if (mins < 60) return mins + " 分钟前";
+    const h = Math.floor(mins / 60);
+    if (h < 24) return h + " 小时前";
+    return Math.floor(h / 24) + " 天前";
   }
 
   /* ---------------- 存储 ---------------- */
@@ -252,11 +264,13 @@
       Object.keys(m).forEach(function (sym) { prices[sym] = m[sym]; });
       renderLive();
       renderSummary();
+      if (Object.keys(m).length) lastSuccessAt = Date.now(); // 真实拿到实时数据才更新
     });
   }
 
   function refreshPrices() {
     // 按交易所区域分组去重，每个区域发一次批量请求，替代「每个持仓一个请求」。
+    lastAttemptAt = Date.now();
     const seen = {};
     const byRegion = {};
     state.holdings.forEach(function (h) {
@@ -278,6 +292,7 @@
       return fetchSymbol("FX_IDC:USDCNY", "forex");
     }).then(function (p) {
       fx = p ? { rate: p.price, fallback: false } : { rate: FALLBACK_USDCNY, fallback: true };
+      if (p) lastSuccessAt = Date.now(); // 汇率取到即认为本轮成功
     }).catch(function () {
       fx = { rate: FALLBACK_USDCNY, fallback: true };
     }).then(function () {
@@ -572,7 +587,15 @@
       meta = "加载行情中…";
     } else {
       meta = "1 美元 ≈ " + fx.rate.toFixed(4) + " 人民币" + (fx.fallback ? "（估算）" : "") + " · ";
-      meta += "更新于 " + new Date().toLocaleTimeString("zh-CN", { hour12: false });
+      // 用真正拿到数据的时间戳，而不是本次渲染时间；最近一次刷新失败时如实提示数据有多旧。
+      const failed = !lastSuccessAt || lastAttemptAt > lastSuccessAt;
+      if (failed) {
+        meta += lastSuccessAt
+          ? "价格获取失败，显示的是 " + agoText(Date.now() - lastSuccessAt) + " 的数据"
+          : "价格获取失败（暂未取得数据）";
+      } else {
+        meta += "更新于 " + new Date(lastSuccessAt).toLocaleTimeString("zh-CN", { hour12: false });
+      }
       if (state.tdKey) meta += " · 美股已接入实时";
       const excluded = state.holdings.length - state.holdings.filter(function (h) { return valueCNY(h) != null; }).length;
       if (excluded > 0) meta += " · " + excluded + " 项未计入（缺数量或无行情）";
