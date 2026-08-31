@@ -13,6 +13,8 @@
   const FALLBACK_USDCNY = 7.2;
   const TD_BASE = "https://api.twelvedata.com/quote";   // 美股实时行情（CORS 允许，按符号计费）
   const TD_REFRESH_MS = 60000;                          // 美股刷新间隔；免费档 800 积分/天，按符号扣
+  const MAX_HOLDINGS = 500;                             // 导入时 holdings 条数上限，防止异常文件撑爆 localStorage
+  const MAX_FIELD_LEN = 64;                             // 单个 symbol / label 字段长度上限
 
   const CATS = {
     us:     { name: "美股",   color: "#2962ff", region: "america", currency: "USD", costUnit: "美元" },
@@ -52,6 +54,11 @@
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+
+  function trunc(s, n) {
+    const v = String(s == null ? "" : s);
+    return v.length > n ? v.slice(0, n) : v;
   }
 
   function genId() {
@@ -103,18 +110,22 @@
   }
 
   function normalize(data) {
-    const holdings = (data && Array.isArray(data.holdings) ? data.holdings : [])
+    const all = Array.isArray(data && data.holdings) ? data.holdings : [];
+    const holdings = all
       .map(function (h) {
         return {
           id: h.id || genId(),
           cat: CATS[h.cat] ? h.cat : "us",
-          symbol: String(h.symbol || "").trim(),
-          label: String(h.label || "").trim(),
+          symbol: trunc(String(h.symbol || "").trim(), MAX_FIELD_LEN),
+          label: trunc(String(h.label || "").trim(), MAX_FIELD_LEN),
           qty: String(h.qty || "").trim(),
           cost: String(h.cost || "").trim(),
         };
       })
-      .filter(function (h) { return h.symbol; });
+      .filter(function (h) { return h.symbol; })
+      .slice(0, MAX_HOLDINGS);
+
+    if (all.length > MAX_HOLDINGS) toast("仅导入前 " + MAX_HOLDINGS + " 条（超出已丢弃）");
 
     return {
       theme: data && data.theme === "light" ? "light" : "dark",
