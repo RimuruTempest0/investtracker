@@ -45,13 +45,12 @@ python3 -m http.server 8000
 
 ## 部署到 GitHub Pages
 
-1. 把本仓库推到一个 GitHub 仓库。
+1. 把本仓库推到一个 GitHub 仓库（push 到 `main` 分支）。
 2. 仓库 **Settings → Pages**，在 **Build and deployment** 里：
-   - Source 选 **Deploy from a branch**
-   - Branch 选 `main`，目录选 **`/docs`**（或先把 `dashboard/` 改名/复制为 `docs/`）
-3. 保存后 GitHub 会给出形如 `https://<用户名>.github.io/<仓库名>/` 的地址。
+   - Source 选 **GitHub Actions**（本仓库已内置 `.github/workflows/deploy.yml`，push 到 `main` 会自动打包发布，无需手动选目录）。
+3. 等仓库顶部 **Actions** 标签里的工作流跑完，GitHub 会给出形如 `https://<用户名>.github.io/<仓库名>/` 的地址。
 
-> 因为这是纯静态站点，`index.html` 里引用的 `styles.css` / `app.js` 都是**相对路径**，所以放在 `/docs` 子目录（即仓库子路径）下也能正常加载。
+> 因为这是纯静态站点，`index.html` 里引用的 `styles.css` / `app.js` 都是**相对路径**，所以无论部署在仓库根还是子路径下都能正常加载。
 
 ## 注意事项
 
