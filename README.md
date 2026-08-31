@@ -58,3 +58,7 @@ python3 -m http.server 8000
 - 行情来自 TradingView 免费 widget，仅供个人查看，**不作为下单依据**（A股行情受交易所源影响可能有延迟）。
 - 持仓数据存在浏览器本地，**换设备不自动同步**；用「备份」导出一份 JSON，在另一台设备「导入」即可。
 - 免费版 widget 需要联网，且每个卡片是一个 iframe，持仓很多时加载会稍慢。
+
+## License
+
+[MIT](LICENSE) © 2026 RimuruTempest0
