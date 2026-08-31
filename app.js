@@ -161,43 +161,59 @@
 
   /* ---------------- 行情抓取（TradingView scanner） ---------------- */
 
+  // 对 scanner POST 做一次轻量重试：失败后等 2.5s 再试一次，再失败就交给调用方等下个周期。
+  // 减少偶发网络抖动造成的「未计入」闪烁。
+  async function postScan(region, body) {
+    async function attempt() {
+      const res = await fetch(SCANNER + region + "/scan", {
+        method: "POST",
+        // 不显式设 Content-Type，浏览器会用 text/plain，避免触发 CORS 预检失败。
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error("scanner " + res.status);
+      return res.json();
+    }
+    try {
+      return await attempt();
+    } catch (e) {
+      await new Promise(function (r) { setTimeout(r, 2500); });
+      return await attempt();
+    }
+  }
+
   async function fetchSymbol(symbol, region) {
-    const res = await fetch(SCANNER + region + "/scan", {
-      method: "POST",
-      // 不显式设 Content-Type，浏览器会用 text/plain，避免触发 CORS 预检失败。
-      body: JSON.stringify({
+    try {
+      const json = await postScan(region, {
         symbols: { tickers: [symbol], query: { types: [] } },
         columns: ["name", "close", "change"],
-      }),
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    const row = json && json.data && json.data[0];
-    if (row && row.d && isFinite(row.d[1])) return { price: row.d[1], change: row.d[2] };
-    return null;
+      });
+      const row = json && json.data && json.data[0];
+      if (row && row.d && isFinite(row.d[1])) return { price: row.d[1], change: row.d[2] };
+      return null;
+    } catch (e) {
+      return null;
+    }
   }
 
   // 批量查询：一次请求取回同一区域内的多个符号，按返回行的 s（符号名）对应回结果，
   // 大幅减少请求数，从而允许更快的刷新间隔而不被限流。
   async function fetchBatch(region, symbols) {
     if (!symbols || !symbols.length) return {};
-    const res = await fetch(SCANNER + region + "/scan", {
-      method: "POST",
-      // 不显式设 Content-Type，浏览器会用 text/plain，避免触发 CORS 预检失败。
-      body: JSON.stringify({
+    try {
+      const json = await postScan(region, {
         symbols: { tickers: symbols, query: { types: [] } },
         columns: ["name", "close", "change"],
-      }),
-    });
-    if (!res.ok) return {};
-    const json = await res.json();
-    const out = {};
-    (json && json.data ? json.data : []).forEach(function (row) {
-      if (row && row.s && row.d && isFinite(row.d[1])) {
-        out[row.s] = { price: row.d[1], change: row.d[2] };
-      }
-    });
-    return out;
+      });
+      const out = {};
+      (json && json.data ? json.data : []).forEach(function (row) {
+        if (row && row.s && row.d && isFinite(row.d[1])) {
+          out[row.s] = { price: row.d[1], change: row.d[2] };
+        }
+      });
+      return out;
+    } catch (e) {
+      return {};
+    }
   }
 
   // 根据交易所前缀决定 scanner 区域，找不到就用类别默认区域。
