@@ -10,10 +10,10 @@
   const SCANNER = "https://scanner.tradingview.com/";
   const TV_EMBED = "https://s3.tradingview.com/external-embedding/";
   const GOLD_GRAMS_PER_OUNCE = 31.1035;
-  const REFRESH_MS = 10000;
   const FALLBACK_USDCNY = 7.2;
   const TD_BASE = "https://api.twelvedata.com/quote";   // 美股实时行情（CORS 允许，按符号计费）
-  const TD_REFRESH_MS = 60000;                          // 美股刷新间隔；免费档 800 积分/天，按符号扣
+  const REFRESH_OPTIONS = [30, 60, 300];                // 可选刷新间隔（秒）
+  const REFRESH_DEFAULT = 60;                           // 默认 1 分钟
   const MAX_HOLDINGS = 500;                             // 导入时 holdings 条数上限，防止异常文件撑爆 localStorage
   const MAX_FIELD_LEN = 64;                             // 单个 symbol / label 字段长度上限
 
@@ -48,6 +48,8 @@
   let fx = null;       // { rate, fallback }
   let lastSuccessAt = null;   // 最近一次真正取到行情的毫秒时间戳（区分"发起刷新"和"拿到数据"）
   let lastAttemptAt = 0;      // 最近一次发起 scanner 刷新的时间戳，用于判断最近一次是否失败
+  let priceTimer = null;      // 主行情定时器句柄
+  let tdTimer = null;         // 美股实时行情定时器句柄
   let suggestResults = [];
   let suggestIndex = -1;
 
@@ -144,6 +146,7 @@
       theme: data && data.theme === "light" ? "light" : "dark",
       currency: data && data.currency === "USD" ? "USD" : "CNY",
       tdKey: data && typeof data.tdKey === "string" ? data.tdKey : "",
+      refreshSec: REFRESH_OPTIONS.indexOf(data && Number(data.refreshSec)) >= 0 ? Number(data.refreshSec) : REFRESH_DEFAULT,
       holdings: holdings,
     };
   }
@@ -315,6 +318,15 @@
       renderLive();
       renderSummary();
     });
+  }
+
+  // 按用户选择的频率启动/重置两个定时器；改频率时清旧的重开。
+  function applyInterval() {
+    const sec = (state && REFRESH_OPTIONS.indexOf(state.refreshSec) >= 0) ? state.refreshSec : REFRESH_DEFAULT;
+    clearInterval(priceTimer);
+    clearInterval(tdTimer);
+    priceTimer = setInterval(refreshPrices, sec * 1000);
+    tdTimer = setInterval(refreshTD, sec * 1000);
   }
 
   /* ---------------- 估值 ---------------- */
@@ -828,12 +840,15 @@
 
     $("#btn-settings").addEventListener("click", function () {
       $("#td-key").value = state.tdKey || "";
+      $("#f-refresh").value = String((state && REFRESH_OPTIONS.indexOf(state.refreshSec) >= 0) ? state.refreshSec : REFRESH_DEFAULT);
       openModal("modal-settings");
     });
     $("#settings-form").addEventListener("submit", function (e) {
       e.preventDefault();
       state.tdKey = $("#td-key").value.trim();
+      state.refreshSec = parseInt($("#f-refresh").value, 10) || REFRESH_DEFAULT;
       save();
+      applyInterval();
       closeModal("modal-settings");
       toast(state.tdKey ? "已接入美股实时行情" : "已清除，美股回到延迟行情");
       refreshPrices();
@@ -978,8 +993,7 @@
     renderSummary();
     refreshPrices();
     refreshTD();
-    setInterval(refreshPrices, REFRESH_MS);
-    setInterval(refreshTD, TD_REFRESH_MS);
+    applyInterval();
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) { refreshPrices(); refreshTD(); }
     });

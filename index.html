@@ -169,6 +169,16 @@
           <input type="password" id="td-key" placeholder="粘贴你的免费 API Key" spellcheck="false" autocomplete="off" />
           <small class="field__hint">免费注册：twelvedata.com/pricing 选 Basic 免费档，即可拿到 API Key。<br />填一次后保存在本机浏览器，不会上传。美股约每 1 分钟刷新一次（免费档 800 积分/天，按符号计费）。</small>
         </label>
+
+        <label class="field">
+          <span>行情刷新频率</span>
+          <select id="f-refresh">
+            <option value="30">30 秒</option>
+            <option value="60" selected>1 分钟</option>
+            <option value="300">5 分钟</option>
+          </select>
+          <small class="field__hint">美股实时接口按符号计费，频率越快越费配额；长开页面建议选 1 分钟以上。</small>
+        </label>
         <footer class="modal__foot">
           <button type="button" class="btn btn--ghost" data-close="modal-settings">取消</button>
           <button type="submit" class="btn btn--primary">保存</button>

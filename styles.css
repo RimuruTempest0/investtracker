@@ -269,7 +269,8 @@ html[data-theme="dark"] .theme-icon--dark { display: none; }
 .form { padding: 16px 18px 4px; display: flex; flex-direction: column; gap: 14px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
 .field > span { font-weight: 600; }
-.field input {
+.field input,
+.field select {
   font: inherit;
   font-size: 14px;
   padding: 10px 12px;
@@ -280,7 +281,9 @@ html[data-theme="dark"] .theme-icon--dark { display: none; }
   outline: none;
   transition: border-color .15s ease;
 }
-.field input:focus { border-color: var(--accent); }
+.field select { cursor: pointer; }
+.field input:focus,
+.field select:focus { border-color: var(--accent); }
 .field__hint { font-size: 12px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .req { color: #e53935; }
 
