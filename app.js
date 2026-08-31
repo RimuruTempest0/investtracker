@@ -6,6 +6,7 @@
   "use strict";
 
   const STORAGE_KEY = "investtracker-dashboard-v1";
+  const HINT_DISMISS_KEY = "investtracker-hint-dismissed-v1";   // 首次提示条每台设备只显示一次
   const SCANNER = "https://scanner.tradingview.com/";
   const TV_EMBED = "https://s3.tradingview.com/external-embedding/";
   const GOLD_GRAMS_PER_OUNCE = 31.1035;
@@ -919,6 +920,7 @@
     });
 
     $("#hint-close").addEventListener("click", function () {
+      try { localStorage.setItem(HINT_DISMISS_KEY, "1"); } catch (e) {}
       $("#hint").classList.add("hidden");
     });
   }
@@ -942,7 +944,7 @@
     document.addEventListener("visibilitychange", function () {
       if (!document.hidden) { refreshPrices(); refreshTD(); }
     });
-    if (!hadData) $("#hint").classList.remove("hidden");
+    if (!hadData && !safeGet(HINT_DISMISS_KEY)) $("#hint").classList.remove("hidden");
   }
 
   init();
